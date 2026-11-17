@@ -27,32 +27,40 @@ flowchart TD
     subgraph Gatekeeper["2. Pre-Flight Gatekeeper & Ingestion"]
         Downloader["Cloud Resolver & Ingestion Cache"]
         Inspector["PDF Metadata & Page Inspector (pdfinfo)"]
-        Threshold{"Size & Image Check"}
+        Threshold{"Doc Type & Mode"}
     end
 
-    subgraph CoreEngine["3. Calibre High-Fidelity Conversion Core"]
+    subgraph CoreEngine["3. Calibre High-Fidelity & Devbook Core"]
         Decomp["Parallel Decomposition (pdftohtml)"]
         XMLAlign["libxml2 Runtime Synchronizer"]
         AST["HTML & CSS AST Generator"]
-        Heuristics["Heuristic Layout Engine"]
-        Unwrap["Line-Unwrapping (factor 0.45)"]
+        DevbookFilter{"Devbook Mode?"}
+        DevbookCSS["Inject Devbook CSS (JetBrains Mono / Callouts)"]
+        SafeDehyphen["Disable Dehyphenation (Preserves Code Tokens)"]
+        StandardHeuristics["Standard Unwrap & Heuristics"]
         TableLin["Table Linearization"]
         EPUB3["Standard EPUB 3 Container Assembly"]
     end
 
-    subgraph LargePDFEngine["4. Large-PDF Optimization Engine (Pillow)"]
-        SizeCheck{"EPUB > 30 MB?"}
+    subgraph DualPipeline["4. Color vs. Grayscale Pipeline"]
+        TargetEdition{"Edition Type"}
+        ColorBranch["Tablet Profile (Full Color Diagrams & Syntax)"]
+        GrayBranch["Kindle Profile (8-Bit Autocontrast Monochrome)"]
+    end
+
+    subgraph LargePDFEngine["5. Optimization Engine (Pillow)"]
+        SizeCheck{"Need Optimization?"}
         Unpack["Unpack EPUB Archive"]
-        Downsample["LANCZOS Raster Downsampling (max 960px)"]
-        Recompress["Adaptive JPEG/PNG Quality Recompression (q=70)"]
+        Downsample["LANCZOS Raster Downsampling (max 1200px)"]
+        Recompress["Adaptive JPEG Quality (q=80 color / q=72 gray)"]
         Repack["Spec-Compliant Repack (mimetype ZIP_STORED first)"]
     end
 
-    subgraph DeliverySubsystem["5. Delivery & Daemon Subsystem"]
+    subgraph DeliverySubsystem["6. Delivery & Daemon Subsystem"]
         IPv4Socket["IPv4 Fast-Path Socket Adapter"]
         TGCli["tg-cli Multipart Uploader"]
         TGService["Systemd Background Listener (tg-bot.service)"]
-        UserDevice["Smartphone / Tablet (Apple Books, Kindle, Play Books)"]
+        UserDevice["Smartphone / Kindle / Tablet (Apple Books, Kindle, Play Books)"]
     end
 
     SFTP --> Inspector
@@ -64,7 +72,13 @@ flowchart TD
 
     Inspector --> Threshold
     Threshold --> Decomp
-    Decomp --> XMLAlign --> AST --> Heuristics --> Unwrap --> TableLin --> EPUB3
+    Decomp --> XMLAlign --> AST --> DevbookFilter
+    DevbookFilter -- Yes --> DevbookCSS --> SafeDehyphen --> TableLin
+    DevbookFilter -- No --> StandardHeuristics --> TableLin
+    TableLin --> TargetEdition
+
+    TargetEdition --> ColorBranch --> EPUB3
+    TargetEdition --> GrayBranch --> EPUB3
 
     EPUB3 --> SizeCheck
     SizeCheck -- Yes --> Unpack --> Downsample --> Recompress --> Repack
@@ -97,6 +111,39 @@ To solve this, `pdf2epub` incorporates an automated image recompression engine:
 > * Input: **167 MB PDF** (*Principles of Accounting, Vol 1*, 973 pages, 1,190 embedded images).
 > * Unoptimized EPUB: **140 MB** (times out on Telegram).
 > * Optimized Output: **27.5 MB** (compressed in ~12 seconds, uploads to Telegram in ~15 seconds).
+
+---
+
+## 💻 Developer Books (Devbooks) & Code Integrity
+
+Converting software engineering, DevOps, and technical architecture books requires specialized handling that ordinary eBook converters miss:
+
+### 1. Code Block Preservation vs. Destructive Dehyphenation
+- **The Issue**: Standard eBook heuristics assume words containing hyphens at line endings are hyphenated prose (`con- \n figuration`). When applied to source code, commands like `-DskipTests`, Maven/Gradle dependencies (`quarkus-resteasy-reactive`), or CSS properties (`font-family`) get erroneously merged or mangled. Even worse, Calibre's vocabulary heuristics enter quadratic token lookups on code tokens, freezing conversions for 7+ minutes.
+- **The Fix**: `pdf2epub` detects devbooks, disables destructive hyphenation (`--disable-dehyphenate`), and optimizes unwrap factor (`0.35`) so CLI commands, JSON/YAML configs, and code snippets stay 100% verbatim.
+
+### 2. Devbook Typography & Monospace Styling
+All code listings (`<pre>`, `<code>`, `<tt>`, `<kbd>`) are injected with a professional developer styling stack:
+* **Font Hierarchy**: `'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace`.
+* **Container Styling**: Light modern code background (`#f6f8fa`), border accent (`#007acc`), and `white-space: pre-wrap` to prevent code lines from overflowing mobile screens.
+* **Callouts & Aside Boxes**: Distinct left-bordered quote blocks for tips, architectural notes, and cautionary warnings.
+* **Deep TOC Navigation**: Unlocked multi-level chapter, section, and sub-heading hierarchy (`--max-toc-links=0 --toc-threshold=4`).
+
+### 3. Dual-Edition Output: Full Color vs. E-Ink Grayscale
+Technical readers read across different devices. `pdf2epub` supports simultaneous dual generation:
+
+```bash
+# Generate BOTH editions with one command
+pdf2epub /tmp/Quarkus_in_Action.pdf --both -t
+```
+
+| Feature | 📘 Full Color Edition | 📱 E-Ink Grayscale Edition |
+| :--- | :--- | :--- |
+| **Target Devices** | iPad, Tablets, Desktop, Web Reader | Kindle Paperwhite, Kobo, Boox Palma |
+| **Image Pipeline** | Full-color diagrams, architecture schematics | High-contrast 8-bit monochrome (`autocontrast`) |
+| **Output Profile** | `--output-profile=tablet` | `--output-profile=kindle` |
+| **File Footprint** | ~3.5 MB – 15 MB | **3.3 MB** (~75% reduction) |
+| **Battery Impact** | Normal | Ultra-low E-Ink refresh & battery drain |
 
 ---
 
@@ -154,6 +201,12 @@ The script will:
 ```bash
 # Basic conversion and immediate Telegram delivery
 pdf2epub /path/to/document.pdf -t
+
+# Devbook Dual-Edition: Builds BOTH Color and E-Ink Grayscale editions
+pdf2epub Quarkus_in_Action.pdf --both -t
+
+# Dedicated E-Ink Grayscale Edition (Kindle / Kobo optimized)
+pdf2epub Technical_Manual.pdf --grayscale -t
 
 # Custom title, author, and Telegram caption
 pdf2epub document.pdf -t --title "Document Title" --author "Author Name" --caption "📖 Here is your book!"

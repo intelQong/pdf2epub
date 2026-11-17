@@ -7,7 +7,9 @@ formatting, unwrap broken lines, fix paragraphs, and output clean EPUB3.
 Features:
 - Local PDF files and Cloud URLs (Google Drive, Dropbox, OneDrive, Direct links)
 - Smart Heuristics: dehyphenation, line unwrapping, table linearization
-- Large PDF Optimizer: Automatic raster downsampling & Pillow compression (<50MB for Telegram)
+- Devbook Preset: Monospace code listings, callouts, deep TOC navigation
+- Color & Grayscale Modes: E-Ink monochrome optimization with contrast boosting
+- Large PDF Optimizer: Automatic raster downsampling & Pillow compression (<30MB for Telegram)
 - Automated delivery to Telegram via universal tg-cli
 """
 
@@ -25,10 +27,115 @@ import urllib.request
 import zipfile
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
+
+
+DEVBOOK_COLOR_CSS = """
+/* Devbook Structural Styling (Color Edition) */
+pre, code, tt, kbd, samp {
+    font-family: 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, 'Courier New', monospace !important;
+    font-size: 0.88em !important;
+    line-height: 1.45 !important;
+    white-space: pre-wrap !important;
+    word-wrap: break-word !important;
+}
+code {
+    background-color: rgba(27, 31, 35, 0.08);
+    color: #c7254e;
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+}
+pre {
+    background-color: #f6f8fa !important;
+    border: 1px solid #d1d5da !important;
+    border-left: 4px solid #007acc !important;
+    padding: 10px 14px !important;
+    border-radius: 4px;
+    margin: 1.2em 0 !important;
+    overflow-x: auto;
+    color: #24292e;
+}
+pre code {
+    background-color: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+}
+blockquote {
+    border-left: 4px solid #0366d6 !important;
+    background-color: #f1f8ff !important;
+    padding: 10px 16px !important;
+    margin: 1.2em 0 !important;
+    color: #032f62;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.2em 0;
+}
+th, td {
+    border: 1px solid #dfe2e5;
+    padding: 6px 12px;
+}
+th {
+    background-color: #f6f8fa;
+    font-weight: 600;
+}
+"""
+
+DEVBOOK_GRAYSCALE_CSS = """
+/* Devbook Structural Styling (E-Ink / Grayscale Edition) */
+pre, code, tt, kbd, samp {
+    font-family: 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, 'Courier New', monospace !important;
+    font-size: 0.88em !important;
+    line-height: 1.45 !important;
+    white-space: pre-wrap !important;
+    word-wrap: break-word !important;
+}
+code {
+    background-color: #eeeeee !important;
+    color: #000000 !important;
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+}
+pre {
+    background-color: #f4f4f4 !important;
+    border: 1px solid #bbbbbb !important;
+    border-left: 4px solid #333333 !important;
+    padding: 10px 14px !important;
+    border-radius: 4px;
+    margin: 1.2em 0 !important;
+    overflow-x: auto;
+    color: #000000 !important;
+}
+pre code {
+    background-color: transparent !important;
+    color: inherit !important;
+    padding: 0 !important;
+}
+blockquote {
+    border-left: 4px solid #555555 !important;
+    background-color: #f8f8f8 !important;
+    padding: 10px 16px !important;
+    margin: 1.2em 0 !important;
+    color: #111111 !important;
+}
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.2em 0;
+}
+th, td {
+    border: 1px solid #cccccc;
+    padding: 6px 12px;
+}
+th {
+    background-color: #e5e5e5;
+    font-weight: bold;
+}
+"""
 
 
 def is_url(path):
@@ -107,9 +214,10 @@ def download_cloud_file(url, target_dir):
     raise RuntimeError(f"Could not download file from URL: {url}")
 
 
-def optimize_epub(epub_path, max_dim=960, quality=70, target_max_mb=30):
+def optimize_epub(epub_path, max_dim=1200, quality=80, target_max_mb=8, grayscale=False):
     """
     Compress & downsample oversized raster images inside an EPUB.
+    Optionally converts all images to high-contrast monochrome (Grayscale / E-Ink).
     Guarantees output stays under Telegram's payload threshold (<30MB)
     while preserving standard EPUB3 structure and reading clarity.
     """
@@ -119,11 +227,13 @@ def optimize_epub(epub_path, max_dim=960, quality=70, target_max_mb=30):
     initial_size = os.path.getsize(epub_path)
     initial_mb = initial_size / (1024 * 1024)
 
-    # Only run if larger than target threshold or explicitly called
-    if target_max_mb and initial_mb <= target_max_mb:
+    # For Color mode: skip if already compact (<= target_max_mb)
+    # For Grayscale mode: always process to convert images to monochrome
+    if not grayscale and target_max_mb and initial_mb <= target_max_mb:
         return epub_path
 
-    print(f"⚡ Large EPUB detected ({initial_mb:.1f} MB > target {target_max_mb} MB). Running optimization engine...")
+    mode_label = "Grayscale (E-Ink)" if grayscale else "Color"
+    print(f"⚡ Processing EPUB images ({mode_label} Mode, {initial_mb:.1f} MB)...")
     t0 = time.time()
     temp_dir = epub_path + "_opt_tmp"
     opt_epub = epub_path + ".optimized.epub"
@@ -146,27 +256,37 @@ def optimize_epub(epub_path, max_dim=960, quality=70, target_max_mb=30):
                     with Image.open(img_path) as im:
                         w, h = im.size
                         need_resize = w > max_dim or h > max_dim
-                        need_compress = old_bytes > 25 * 1024
 
-                        if need_resize or need_compress:
-                            if need_resize:
-                                im.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                        if need_resize:
+                            im.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
-                            if im.mode in ("RGBA", "LA") and "transparency" in im.info:
-                                im.save(img_path, format="PNG", optimize=True)
-                            else:
-                                if im.mode != "RGB":
-                                    im = im.convert("RGB")
-                                im.save(img_path, format="JPEG", quality=quality, optimize=True)
+                        if grayscale:
+                            # High-contrast monochrome conversion for E-Ink
+                            im_gray = ImageOps.autocontrast(im.convert("L"))
+                            im_gray.save(img_path, format="JPEG", quality=72, optimize=True)
+                        else:
+                            # Graceful color optimization with white background for alpha
+                            if im.mode in ("RGBA", "LA", "P"):
+                                bg = Image.new("RGB", im.size, (255, 255, 255))
+                                if im.mode == "P":
+                                    im = im.convert("RGBA")
+                                if "A" in im.getbands():
+                                    bg.paste(im, mask=im.split()[-1])
+                                else:
+                                    bg.paste(im)
+                                im = bg
+                            elif im.mode != "RGB":
+                                im = im.convert("RGB")
+                            im.save(img_path, format="JPEG", quality=quality, optimize=True)
 
-                            new_bytes = os.path.getsize(img_path)
-                            if new_bytes < old_bytes:
-                                reduced_bytes += (old_bytes - new_bytes)
-                            processed_count += 1
+                        new_bytes = os.path.getsize(img_path)
+                        if new_bytes < old_bytes:
+                            reduced_bytes += (old_bytes - new_bytes)
+                        processed_count += 1
                 except Exception:
                     pass
 
-    print(f" Optimized {processed_count} images. Repackaging EPUB archive...")
+    print(f" Processed {processed_count} images ({mode_label}). Repackaging EPUB archive...")
     with zipfile.ZipFile(opt_epub, "w", compression=zipfile.ZIP_DEFLATED) as z_out:
         # EPUB spec mandates mimetype is first entry and uncompressed (ZIP_STORED)
         mimetype_path = os.path.join(temp_dir, "mimetype")
@@ -184,9 +304,9 @@ def optimize_epub(epub_path, max_dim=960, quality=70, target_max_mb=30):
     shutil.rmtree(temp_dir, ignore_errors=True)
     final_size = os.path.getsize(opt_epub)
     final_mb = final_size / (1024 * 1024)
-    print(f"✅ Optimization complete in {time.time()-t0:.1f}s: {initial_mb:.1f} MB -> {final_mb:.1f} MB")
+    print(f"✅ Processing complete in {time.time()-t0:.1f}s: {initial_mb:.1f} MB -> {final_mb:.1f} MB")
 
-    if final_size < initial_size:
+    if final_size < initial_size or grayscale:
         os.replace(opt_epub, epub_path)
     else:
         if os.path.isfile(opt_epub):
@@ -206,23 +326,26 @@ def convert_pdf_to_epub(
     smarten_punctuation=True,
     change_justification="justify",
     optimize_for_large=True,
-    target_max_mb=48
+    target_max_mb=30,
+    devbook=True,
+    grayscale=False
 ):
     """
-    Run Calibre ebook-convert with layout preservation and large-file optimization.
+    Run Calibre ebook-convert with layout preservation, devbook styling, and optimization.
     """
     if not os.path.isfile(input_pdf):
         raise FileNotFoundError(f"Input PDF not found: {input_pdf}")
 
     if not output_epub:
         base_name = os.path.splitext(input_pdf)[0]
-        output_epub = base_name + ".epub"
+        suffix = "_Grayscale.epub" if grayscale else "_Color.epub"
+        output_epub = base_name + suffix
 
     output_dir = os.path.dirname(os.path.abspath(output_epub))
     os.makedirs(output_dir, exist_ok=True)
 
     input_size_mb = os.path.getsize(input_pdf) / (1024 * 1024)
-    is_large = input_size_mb > 50
+    is_large = input_size_mb > 40
 
     cmd = [
         "ebook-convert",
@@ -233,19 +356,41 @@ def convert_pdf_to_epub(
         "--pdf-engine=calibre",
     ]
 
+    # Grayscale vs Color E-Reader profile
+    if grayscale:
+        cmd.append("--output-profile=kindle")
+    else:
+        cmd.append("--output-profile=tablet")
+
+    # Devbook specific structure & CSS
+    if devbook:
+        css_content = DEVBOOK_GRAYSCALE_CSS if grayscale else DEVBOOK_COLOR_CSS
+        cmd.append(f"--extra-css={css_content}")
+        cmd.extend([
+            "--max-toc-links=0",
+            "--toc-threshold=4",
+        ])
+
     # Large PDF specific tuning
     if is_large or optimize_for_large:
         cmd.extend([
-            "--max-image-res=1440x1920",
+            "--epub-max-image-size=1200x1600",
             "--subset-embedded-fonts",
             "--epub-flatten",
         ])
 
     if enable_heuristics:
-        cmd.extend([
-            "--enable-heuristics",
-            "--html-unwrap-factor=0.45",
-        ])
+        if devbook:
+            cmd.extend([
+                "--enable-heuristics",
+                "--disable-dehyphenate",
+                "--html-unwrap-factor=0.35",
+            ])
+        else:
+            cmd.extend([
+                "--enable-heuristics",
+                "--html-unwrap-factor=0.45",
+            ])
 
     if linearize_tables:
         cmd.append("--linearize-tables")
@@ -257,12 +402,14 @@ def convert_pdf_to_epub(
         cmd.append(f"--change-justification={change_justification}")
 
     if title:
-        cmd.append(f"--title={title}")
+        full_title = f"{title} (Grayscale Edition)" if grayscale and "grayscale" not in title.lower() else title
+        cmd.append(f"--title={full_title}")
 
     if author:
         cmd.append(f"--authors={author}")
 
-    print(f" Running Calibre conversion:\n  Input:  {input_pdf} ({input_size_mb:.1f} MB)\n  Output: {output_epub}")
+    mode_label = "Grayscale (E-Ink)" if grayscale else "Full Color"
+    print(f" Running Calibre conversion [{mode_label}]:\n  Input:  {input_pdf} ({input_size_mb:.1f} MB)\n  Output: {output_epub}")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     if proc.returncode != 0:
@@ -272,12 +419,12 @@ def convert_pdf_to_epub(
     if not os.path.isfile(output_epub) or os.path.getsize(output_epub) == 0:
         raise RuntimeError("ebook-convert completed but output EPUB was not created.")
 
-    # Run optimizer if output EPUB exceeds target threshold
-    if optimize_for_large:
-        output_epub = optimize_epub(output_epub, target_max_mb=target_max_mb)
+    # Run optimizer for image downsampling or grayscale conversion
+    if optimize_for_large or grayscale:
+        output_epub = optimize_epub(output_epub, target_max_mb=target_max_mb, grayscale=grayscale)
 
     size_kb = os.path.getsize(output_epub) / 1024
-    print(f" Successfully converted to EPUB: {output_epub} ({size_kb:.1f} KB / {size_kb/1024:.1f} MB)")
+    print(f" Successfully converted to EPUB [{mode_label}]: {output_epub} ({size_kb/1024:.1f} MB)")
     return output_epub
 
 
@@ -302,7 +449,7 @@ def send_to_telegram(epub_file, caption=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="High-fidelity PDF to EPUB converter with cloud download, large PDF optimization & Telegram dispatch"
+        description="High-fidelity PDF to EPUB converter with devbook formatting, grayscale E-Ink mode & Telegram dispatch"
     )
     parser.add_argument("input", help="Local PDF file path or Cloud URL (Google Drive, Dropbox, direct link)")
     parser.add_argument("-o", "--output", help="Destination EPUB path (optional)")
@@ -311,9 +458,13 @@ def main():
     parser.add_argument("--title", help="Book title metadata")
     parser.add_argument("--author", help="Book author metadata")
     parser.add_argument("--epub-version", default="3", choices=["2", "3"], help="EPUB format version (default: 3)")
+    parser.add_argument("--grayscale", "-g", action="store_true", help="Generate Grayscale / E-Ink optimized edition")
+    parser.add_argument("--both", action="store_true", help="Generate both Full Color and Grayscale editions")
+    parser.add_argument("--devbook", action="store_true", default=True, help="Enable devbook styling for code blocks & callouts")
+    parser.add_argument("--no-devbook", action="store_false", dest="devbook", help="Disable devbook styling")
     parser.add_argument("--no-heuristics", action="store_true", help="Disable Calibre heuristic unwrap/formatting fixes")
-    parser.add_argument("--no-optimize", action="store_true", help="Disable large PDF image downsampling/compression")
-    parser.add_argument("--max-mb", type=int, default=48, help="Target max size in MB for Telegram payload optimization (default: 48)")
+    parser.add_argument("--no-optimize", action="store_true", help="Disable image downsampling/compression")
+    parser.add_argument("--max-mb", type=int, default=30, help="Target max size in MB for Telegram payload optimization (default: 30)")
 
     args = parser.parse_args()
 
@@ -325,29 +476,72 @@ def main():
             temp_dir = tempfile.mkdtemp(prefix="pdf2epub_")
             input_file = download_cloud_file(args.input, temp_dir)
 
-        output_file = args.output
-        if not output_file:
-            if is_url(args.input):
-                base_name = os.path.splitext(os.path.basename(input_file))[0]
-                output_file = os.path.join(os.getcwd(), f"{base_name}.epub")
-            else:
-                output_file = os.path.splitext(input_file)[0] + ".epub"
+        base_title = args.title or os.path.splitext(os.path.basename(input_file))[0].replace("_", " ").title()
+        base_author = args.author or ""
 
-        epub_result = convert_pdf_to_epub(
-            input_pdf=input_file,
-            output_epub=output_file,
-            title=args.title,
-            author=args.author,
-            epub_version=args.epub_version,
-            enable_heuristics=not args.no_heuristics,
-            optimize_for_large=not args.no_optimize,
-            target_max_mb=args.max_mb
-        )
+        if args.both:
+            print("🚀 Generating BOTH Full Color and Grayscale (E-Ink) editions...")
+            # 1. Color Edition
+            out_color = args.output or os.path.splitext(input_file)[0] + "_Color.epub"
+            res_color = convert_pdf_to_epub(
+                input_pdf=input_file,
+                output_epub=out_color,
+                title=base_title,
+                author=base_author,
+                epub_version=args.epub_version,
+                enable_heuristics=not args.no_heuristics,
+                optimize_for_large=not args.no_optimize,
+                target_max_mb=args.max_mb,
+                devbook=args.devbook,
+                grayscale=False
+            )
+            if args.send_telegram:
+                send_to_telegram(
+                    res_color,
+                    caption=f"📘 <b>{base_title}</b> (Full Color Devbook Edition)\n<i>Reflowable EPUB3 with syntax-styled code blocks.</i>"
+                )
 
-        if args.send_telegram:
-            send_to_telegram(epub_result, caption=args.caption)
+            # 2. Grayscale Edition
+            out_gray = (os.path.splitext(out_color)[0] if args.output else os.path.splitext(input_file)[0]) + "_Grayscale.epub"
+            res_gray = convert_pdf_to_epub(
+                input_pdf=input_file,
+                output_epub=out_gray,
+                title=base_title,
+                author=base_author,
+                epub_version=args.epub_version,
+                enable_heuristics=not args.no_heuristics,
+                optimize_for_large=not args.no_optimize,
+                target_max_mb=args.max_mb,
+                devbook=args.devbook,
+                grayscale=True
+            )
+            if args.send_telegram:
+                send_to_telegram(
+                    res_gray,
+                    caption=f"📱 <b>{base_title}</b> (E-Ink Grayscale Devbook Edition)\n<i>High-contrast monochrome edition tailored for Kindle & Kobo.</i>"
+                )
 
-        print(f" Done! Result: {epub_result}")
+            print(f"🎉 Both editions generated successfully!\n  Color:     {res_color}\n  Grayscale: {res_gray}")
+
+        else:
+            # Single edition (Color or Grayscale)
+            epub_result = convert_pdf_to_epub(
+                input_pdf=input_file,
+                output_epub=args.output,
+                title=base_title,
+                author=base_author,
+                epub_version=args.epub_version,
+                enable_heuristics=not args.no_heuristics,
+                optimize_for_large=not args.no_optimize,
+                target_max_mb=args.max_mb,
+                devbook=args.devbook,
+                grayscale=args.grayscale
+            )
+            if args.send_telegram:
+                mode_str = "Grayscale E-Ink" if args.grayscale else "Full Color"
+                send_to_telegram(epub_result, caption=args.caption or f"📚 <b>{base_title}</b> ({mode_str} Devbook Edition)")
+
+            print(f" Done! Result: {epub_result}")
 
     finally:
         if temp_dir and os.path.isdir(temp_dir):
