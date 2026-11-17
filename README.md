@@ -5,57 +5,104 @@
 [![Calibre](https://img.shields.io/badge/Calibre-9.2.1+-blueviolet.svg)](https://calibre-ebook.com)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram_Bot-Compatible-2CA5E0.svg?logo=telegram)](https://core.telegram.org/bots/api)
 
-A production-grade, headless toolkit that transforms PDF documents into clean, reflowable **EPUB 3** eBooks without broken line wraps, fractured paragraphs, or distorted layouts, and instantly delivers them to mobile devices via **Telegram**.
+A high-performance, headless toolkit that transforms complex PDF documents into clean, reflowable **EPUB 3** eBooks without broken line wraps, fractured paragraphs, or distorted layouts, and instantly delivers them to mobile devices via **Telegram**.
+
+Tested and verified on massive textbooks (up to 1,000+ pages, 1,000+ embedded figures, 160+ MB PDFs).
 
 ---
 
-## 📌 Architecture Overview
+## 🏗️ System Design & Architecture
 
 ```mermaid
 flowchart TD
-    subgraph InputSources["1. Input Sources"]
-        PDF["Local PDF File"]
-        GDrive["Google Drive URL"]
-        Dropbox["Dropbox URL"]
-        TGUser["Telegram Chat Upload (PDF)"]
+    subgraph Ingestion["1. Client & Ingestion Layer"]
+        SFTP["Termius / SFTP Direct Upload"]
+        CLI_In["CLI Terminal (pdf2epub)"]
+        GDrive["Google Drive URL (gdown)"]
+        Dropbox["Dropbox URL (dl=1 redirect)"]
+        DirectURL["Direct HTTP/S Stream (curl -4)"]
+        TG_Msg["Telegram Direct Upload (@Agyrevnotbot)"]
     end
 
-    subgraph DownloadLayer["2. Ingestion & Retrieval"]
-        GDown["gdown / fuzzy resolver"]
-        DirectCurl["curl -L (Direct/Dropbox)"]
-        TGApi["Telegram Bot getFile API"]
+    subgraph Gatekeeper["2. Pre-Flight Gatekeeper & Ingestion"]
+        Downloader["Cloud Resolver & Ingestion Cache"]
+        Inspector["PDF Metadata & Page Inspector (pdfinfo)"]
+        Threshold{"Size & Image Check"}
     end
 
-    subgraph ConversionEngine["3. Calibre High-Fidelity Engine"]
-        HParser["html5-parser + lxml (libxml2 aligned)"]
-        Heuristics["Heuristic Processing Engine"]
-        Unwrap["Semantic Line-Unwrapping (factor 0.45)"]
+    subgraph CoreEngine["3. Calibre High-Fidelity Conversion Core"]
+        Decomp["Parallel Decomposition (pdftohtml)"]
+        XMLAlign["libxml2 Runtime Synchronizer"]
+        AST["HTML & CSS AST Generator"]
+        Heuristics["Heuristic Layout Engine"]
+        Unwrap["Line-Unwrapping (factor 0.45)"]
         TableLin["Table Linearization"]
-        EPUB3["EPUB 3 Output Formatter"]
+        EPUB3["Standard EPUB 3 Container Assembly"]
     end
 
-    subgraph Delivery["4. Universal Telegram Delivery"]
-        IPv4Opt["IPv4 Fast-Path Socket Optimizer"]
-        TGCli["tg-cli multipart/form-data"]
-        TGService["Systemd Background Listener (tg-bot)"]
-        Phone["User Smartphone / E-Reader"]
+    subgraph LargePDFEngine["4. Large-PDF Optimization Engine (Pillow)"]
+        SizeCheck{"EPUB > 30 MB?"}
+        Unpack["Unpack EPUB Archive"]
+        Downsample["LANCZOS Raster Downsampling (max 960px)"]
+        Recompress["Adaptive JPEG/PNG Quality Recompression (q=70)"]
+        Repack["Spec-Compliant Repack (mimetype ZIP_STORED first)"]
     end
 
-    PDF --> ConversionEngine
-    GDrive --> GDown --> ConversionEngine
-    Dropbox --> DirectCurl --> ConversionEngine
-    TGUser --> TGApi --> ConversionEngine
+    subgraph DeliverySubsystem["5. Delivery & Daemon Subsystem"]
+        IPv4Socket["IPv4 Fast-Path Socket Adapter"]
+        TGCli["tg-cli Multipart Uploader"]
+        TGService["Systemd Background Listener (tg-bot.service)"]
+        UserDevice["Smartphone / Tablet (Apple Books, Kindle, Play Books)"]
+    end
 
-    ConversionEngine --> HParser --> Heuristics --> Unwrap --> TableLin --> EPUB3
-    EPUB3 --> IPv4Opt --> TGCli --> Phone
-    EPUB3 --> TGService --> Phone
+    SFTP --> Inspector
+    CLI_In --> Inspector
+    GDrive --> Downloader --> Inspector
+    Dropbox --> Downloader --> Inspector
+    DirectURL --> Downloader --> Inspector
+    TG_Msg --> Downloader --> Inspector
+
+    Inspector --> Threshold
+    Threshold --> Decomp
+    Decomp --> XMLAlign --> AST --> Heuristics --> Unwrap --> TableLin --> EPUB3
+
+    EPUB3 --> SizeCheck
+    SizeCheck -- Yes --> Unpack --> Downsample --> Recompress --> Repack
+    SizeCheck -- No --> IPv4Socket
+    Repack --> IPv4Socket
+
+    IPv4Socket --> TGCli --> UserDevice
+    TG_Msg -.-> TGService -.-> UserDevice
 ```
 
 ---
 
-## 🧠 Why Standard PDF to EPUB Conversion Fails (And How We Fix It)
+## ⚡ Large PDF Optimization Engine: Under the Hood
 
-PDF is a **page-description language** intended for static print rendering with fixed coordinates, while EPUB is a **dynamic reflowable format** meant for varied screen dimensions. Naive conversions fail catastrophically in four critical ways:
+Converting large, image-heavy PDFs (e.g., academic textbooks, technical manuals, corporate reports) introduces unique challenges that break standard conversion pipelines:
+
+### 1. The Telegram 504 Gateway Timeout Problem
+While Telegram Bot API supports files up to 50 MB for `sendDocument`, Telegram's reverse proxy enforces an internal timeout (~120 seconds). Uploading archives containing 1,000+ uncompressed PNGs often exceeds this timeout, resulting in `504 Gateway Timeout`.
+
+### 2. Automated Two-Stage Optimization
+To solve this, `pdf2epub` incorporates an automated image recompression engine:
+1. **Calibre Pre-Tuning**: Flags like `--max-image-res=1440x1920`, `--subset-embedded-fonts`, and `--epub-flatten` prevent unnecessary font and canvas bloat during initial conversion.
+2. **Lossless/Perceptual Raster Compacting**:
+   - Inspects all images in the generated EPUB container.
+   - Downsamples raster images exceeding `960px` using high-quality `LANCZOS` resampling.
+   - Converts non-alpha PNG graphics (e.g., accounting ledgers, diagrams, graphs) into optimized JPEGs at quality `70`.
+   - **EPUB Spec Preservation**: The archive is repacked ensuring the `mimetype` file is placed first and stored uncompressed (`ZIP_STORED`), while remaining assets are deflated (`ZIP_DEFLATED`).
+
+> **Real-World Benchmark:**
+> * Input: **167 MB PDF** (*Principles of Accounting, Vol 1*, 973 pages, 1,190 embedded images).
+> * Unoptimized EPUB: **140 MB** (times out on Telegram).
+> * Optimized Output: **27.5 MB** (compressed in ~12 seconds, uploads to Telegram in ~15 seconds).
+
+---
+
+## 🧠 Why Standard PDF to EPUB Conversion Fails
+
+PDF is a **page-description language** intended for static print rendering with fixed coordinates, while EPUB is a **dynamic reflowable format** meant for varied screen dimensions:
 
 | Failure Mode | Naive Conversion Result | How Our Pipeline Fixes It |
 | :--- | :--- | :--- |
@@ -64,23 +111,6 @@ PDF is a **page-description language** intended for static print rendering with 
 | **Table Formatting** | Multi-column tabular data overflows smartphone screens horizontally. | `--linearize-tables` converts 2D layout tables into structured linear reader cards. |
 | **Headers & Page Numbers** | Header text and page numbers get interspersed into the middle of reading text. | Calibre regex header/footer detection isolates running headers from primary body copy. |
 | **Typography & Formatting** | Straight quotes and hyphens look amateurish on high-res displays. | `--smarten-punctuation` applies typographic quotation marks (`“”`), em/en dashes (`—`), and proper ellipses (`…`). |
-
----
-
-## ⚙️ Technical Highlights
-
-### 1. Zero External Runtime Dependencies for Telegram
-The Telegram CLI (`tg_cli.py`) utilizes standard library `urllib` and `curl`, requiring **no third-party pip packages**. This ensures 100% portability across fresh server installs, minimal containers, and hardened cloud environments.
-
-### 2. IPv4 Socket Fast-Path
-In many cloud and VPS environments, IPv6 DNS resolution is returned but egress traffic is blocked or unrouted, creating 30+ second connection timeouts. `tg_cli.py` patches `socket.getaddrinfo` dynamically to prefer `socket.AF_INET`, achieving sub-second API round-trips.
-
-### 3. Libxml2 Version Synchronization
-When Calibre is installed on Debian/Ubuntu systems, pip-installed wheels of `lxml` can conflict with system `html5-parser` compiled against system `libxml2`. The automated installer verifies and synchronizes runtime dependencies to prevent conversion runtime aborts.
-
-### 4. Dual-Mode Architecture
-- **CLI Mode**: Direct commands for terminal, cron, scripts, or orchestrators (`pdf2epub`, `tg-send`).
-- **Interactive Daemon Mode**: A lightweight systemd user service (`tg-bot.service`) that listens for user PDF uploads in Telegram and converts them automatically on-demand.
 
 ---
 
@@ -126,7 +156,7 @@ The script will:
 pdf2epub /path/to/document.pdf -t
 
 # Custom title, author, and Telegram caption
-pdf2epub document.pdf -t --title "Document Title" --author "Author Name" --caption "📖 Here is your converted book!"
+pdf2epub document.pdf -t --title "Document Title" --author "Author Name" --caption "📖 Here is your book!"
 ```
 
 ### 2. Convert from Cloud Storage Links
@@ -170,9 +200,9 @@ systemctl --user status tg-bot.service
 journalctl --user -u tg-bot.service -f
 ```
 
-Whenever you drop a `.pdf` file into your chat with the bot in Telegram:
+Whenever you drop a `.pdf` file or paste a cloud link (Google Drive, Dropbox) into your chat with the bot in Telegram:
 1. The bot confirms receipt: `Received <file>.pdf. Converting to EPUB with Calibre...`
-2. It processes the document through the high-fidelity conversion pipeline.
+2. It processes the document through the high-fidelity conversion & optimization pipeline.
 3. It replies with the clean, formatted `.epub` ready to open in Apple Books, Kindle, or Google Play Books.
 
 ---
@@ -181,13 +211,13 @@ Whenever you drop a `.pdf` file into your chat with the bot in Telegram:
 
 ```
 pdf2epub/
-├── pdf2epub.py               # High-fidelity converter CLI & cloud downloader
+├── pdf2epub.py               # High-fidelity converter CLI, cloud downloader & Pillow optimizer
 ├── tg_cli.py                 # Universal Telegram CLI & daemon listener
 ├── install.sh                # Zero-config automated installer
 ├── .env.example              # Configuration template
 ├── systemd/
 │   └── tg-pdf-bot.service    # Systemd service unit definition
-└── README.md                 # Technical documentation
+└── README.md                 # System design & technical documentation
 ```
 
 ---
