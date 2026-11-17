@@ -1,0 +1,27 @@
+# Credentials & Secrets
+.env
+*.env
+bot.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# eBooks & Test files
+*.pdf
+*.epub
+*.mobi
+*.azw3
+/tmp/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
