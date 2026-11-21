@@ -214,6 +214,28 @@ def download_cloud_file(url, target_dir):
     raise RuntimeError(f"Could not download file from URL: {url}")
 
 
+def get_pdf_metadata(pdf_path):
+    """Extract embedded PDF title and author using pdfinfo."""
+    info = {"title": None, "author": None}
+    if not os.path.isfile(pdf_path):
+        return info
+    try:
+        res = subprocess.run(["pdfinfo", pdf_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                if line.startswith("Title:"):
+                    t = line.split(":", 1)[1].strip()
+                    if t and t.lower() not in ("untitled", "microsoft word", "none"):
+                        info["title"] = t
+                elif line.startswith("Author:"):
+                    a = line.split(":", 1)[1].strip()
+                    if a and a.lower() not in ("none", "author", "user"):
+                        info["author"] = a
+    except Exception:
+        pass
+    return info
+
+
 def optimize_epub(epub_path, max_dim=1200, quality=80, target_max_mb=8, grayscale=False):
     """
     Compress & downsample oversized raster images inside an EPUB.
@@ -476,13 +498,23 @@ def main():
             temp_dir = tempfile.mkdtemp(prefix="pdf2epub_")
             input_file = download_cloud_file(args.input, temp_dir)
 
-        base_title = args.title or os.path.splitext(os.path.basename(input_file))[0].replace("_", " ").title()
-        base_author = args.author or ""
+        meta = get_pdf_metadata(input_file)
+        base_title = args.title or meta.get("title") or os.path.splitext(os.path.basename(input_file))[0].replace("_", " ").title()
+        base_author = args.author or meta.get("author") or ""
+
+        # Intelligently rename hex/UUID filenames to descriptive slugs
+        is_hex_name = bool(re.match(r"^[0-9A-Fa-f_-]{16,}$", os.path.splitext(os.path.basename(input_file))[0]))
+        if is_hex_name and base_title:
+            slug = re.sub(r"[^\w\s-]", "", base_title).strip()
+            slug = re.sub(r"[-\s]+", "_", slug)[:40].strip("_")
+            default_base = os.path.join(os.path.dirname(input_file), slug)
+        else:
+            default_base = os.path.splitext(input_file)[0]
 
         if args.both:
-            print("🚀 Generating BOTH Full Color and Grayscale (E-Ink) editions...")
+            print(f"🚀 Generating BOTH Full Color and Grayscale (E-Ink) editions for: {base_title}")
             # 1. Color Edition
-            out_color = args.output or os.path.splitext(input_file)[0] + "_Color.epub"
+            out_color = (os.path.splitext(args.output)[0] + "_Color.epub") if args.output else f"{default_base}_Color.epub"
             res_color = convert_pdf_to_epub(
                 input_pdf=input_file,
                 output_epub=out_color,
@@ -496,13 +528,14 @@ def main():
                 grayscale=False
             )
             if args.send_telegram:
+                author_line = f"<i>Authors: {base_author}</i>\n" if base_author else ""
                 send_to_telegram(
                     res_color,
-                    caption=f"📘 <b>{base_title}</b> (Full Color Devbook Edition)\n<i>Reflowable EPUB3 with syntax-styled code blocks.</i>"
+                    caption=f"📘 <b>{base_title}</b> (Full Color Edition)\n{author_line}• Reflowable EPUB3\n• Preserves full-color diagrams, figures & formatting"
                 )
 
             # 2. Grayscale Edition
-            out_gray = (os.path.splitext(out_color)[0] if args.output else os.path.splitext(input_file)[0]) + "_Grayscale.epub"
+            out_gray = (os.path.splitext(args.output)[0] + "_Grayscale.epub") if args.output else f"{default_base}_Grayscale.epub"
             res_gray = convert_pdf_to_epub(
                 input_pdf=input_file,
                 output_epub=out_gray,
@@ -516,9 +549,10 @@ def main():
                 grayscale=True
             )
             if args.send_telegram:
+                author_line = f"<i>Authors: {base_author}</i>\n" if base_author else ""
                 send_to_telegram(
                     res_gray,
-                    caption=f"📱 <b>{base_title}</b> (E-Ink Grayscale Devbook Edition)\n<i>High-contrast monochrome edition tailored for Kindle & Kobo.</i>"
+                    caption=f"📱 <b>{base_title}</b> (E-Ink Grayscale Edition)\n{author_line}• High-contrast 8-bit monochrome tailored for Kindle & Kobo\n• Battery-efficient, paper-like reading"
                 )
 
             print(f"🎉 Both editions generated successfully!\n  Color:     {res_color}\n  Grayscale: {res_gray}")
